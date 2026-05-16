@@ -877,6 +877,13 @@ internal static partial class Interop
             {
                 throw CreateSslException(SR.net_ssl_use_private_key_failed);
             }
+            #if !TARGET_WINDOWS
+            if (Tpm2KeyChecker.IsTpm2Key(keyPtr))
+            {
+                Tpm2KeyChecker.VerifyKeyMatchesCertificate(keyPtr, certPtr);
+                return;
+            }
+            #endif
 
             //check private key
             retVal = Ssl.SslCtxCheckPrivateKey(contextPtr);

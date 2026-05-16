@@ -942,6 +942,13 @@ namespace System.Security.Cryptography.X509Certificates
         {
             using (X509Certificate2 certificate = CreateFromPem(certPem))
             {
+                #if !TARGET_WINDOWS
+                if (Tpm2KeyLoader.ContainsTss2Key(keyPem))
+                {
+                    RSA tpmRsa = Tpm2KeyLoader.LoadFromPem(keyPem);
+                    return certificate.CopyWithPrivateKey(tpmRsa);
+                }
+                #endif
                 string keyAlgorithm = certificate.GetKeyAlgorithm();
 
                 return keyAlgorithm switch
