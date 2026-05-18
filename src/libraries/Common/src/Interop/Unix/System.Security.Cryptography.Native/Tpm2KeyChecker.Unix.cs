@@ -28,6 +28,21 @@ internal static partial class Interop
 
             // ── Detection ─────────────────────────────────────────────────────
 
+            // Shared detection logic
+            private static bool IsHandleTpm2Backed(nint rawPtr)
+            {
+                nint provider = EVP_PKEY_get0_provider(rawPtr);
+                if (provider == 0)
+                    return false;
+
+                nint namePtr = OSSL_PROVIDER_get0_name(provider);
+                if (namePtr == 0)
+                    return false;
+
+                string name = Marshal.PtrToStringAnsi(namePtr) ?? string.Empty;
+                return string.Equals(name, "tpm2", StringComparison.Ordinal);
+            }
+
             internal static bool IsTpm2Key(SafeEvpPKeyHandle keyPtr)
             {
                 if (keyPtr == null || keyPtr.IsInvalid)
@@ -37,23 +52,32 @@ internal static partial class Interop
                 try
                 {
                     keyPtr.DangerousAddRef(ref addedRef);
-                    nint rawPtr = keyPtr.DangerousGetHandle();
-
-                    nint provider = EVP_PKEY_get0_provider(rawPtr);
-                    if (provider == 0)
-                        return false;
-
-                    nint namePtr = OSSL_PROVIDER_get0_name(provider);
-                    if (namePtr == 0)
-                        return false;
-
-                    string name = Marshal.PtrToStringAnsi(namePtr) ?? string.Empty;
-                    return string.Equals(name, "tpm2", StringComparison.Ordinal);
+                    return IsHandleTpm2Backed(keyPtr.DangerousGetHandle());
                 }
                 finally
                 {
                     if (addedRef)
                         keyPtr.DangerousRelease();
+                }
+            }
+
+            // Used by OpenSslX509CertificateReader.GetRSAPrivateKey() to detect
+            // TPM-backed keys before constructing RSAOpenSsl (which calls EVP_PKEY_dup).
+            internal static bool IsTpm2BackedHandle(SafeEvpPKeyHandle keyHandle)
+            {
+                if (keyHandle == null || keyHandle.IsInvalid)
+                    return false;
+
+                bool addedRef = false;
+                try
+                {
+                    keyHandle.DangerousAddRef(ref addedRef);
+                    return IsHandleTpm2Backed(keyHandle.DangerousGetHandle());
+                }
+                finally
+                {
+                    if (addedRef)
+                        keyHandle.DangerousRelease();
                 }
             }
 

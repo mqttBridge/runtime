@@ -14,7 +14,7 @@ using Internal.Cryptography;
 
 namespace System.Security.Cryptography.X509Certificates
 {
-    public class X509Certificate2 : X509Certificate
+    public partial class X509Certificate2 : X509Certificate
     {
         private volatile byte[]? _lazyRawData;
         private volatile Oid? _lazySignatureAlgorithm;
@@ -943,14 +943,17 @@ namespace System.Security.Cryptography.X509Certificates
             using (X509Certificate2 certificate = CreateFromPem(certPem))
             {
                 #if !TARGET_WINDOWS
+                // TSS2 PRIVATE KEY — bypass OID switch and RSAOpenSsl constructor.
+                // RSAOpenSsl(SafeEvpPKeyHandle) internally calls EvpPKeyDuplicate
+                // which calls EVP_PKEY_dup → tpm2 provider refuses (non-exportable).
+                // Tpm2KeyLoader.LoadAndBind uses CopyWithPrivateKey(SafeEvpPKeyHandle)
+                // which stores the handle directly without any duplication.
                 if (Tpm2KeyLoader.ContainsTss2Key(keyPem))
                 {
-                    RSA tpmRsa = Tpm2KeyLoader.LoadFromPem(keyPem);
-                    return certificate.CopyWithPrivateKey(tpmRsa);
+                    return Tpm2KeyLoader.LoadAndBind(certificate, keyPem);
                 }
                 #endif
                 string keyAlgorithm = certificate.GetKeyAlgorithm();
-
                 return keyAlgorithm switch
                 {
                     Oids.Rsa => ExtractKeyFromPem<RSA>(keyPem, s_RsaPublicKeyPrivateKeyLabels, RSA.Create, certificate.CopyWithPrivateKey),

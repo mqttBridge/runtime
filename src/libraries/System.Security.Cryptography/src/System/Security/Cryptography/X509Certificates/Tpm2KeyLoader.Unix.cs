@@ -13,27 +13,15 @@ namespace System.Security.Cryptography.X509Certificates
     {
         internal const string Tss2Label = "TSS2 PRIVATE KEY";
 
-        // ── LibraryImport P/Invoke ────────────────────────────────────────────
-        // SYSLIB1051: use 'nint' not 'IntPtr' for pointer-sized native integers
-        // in LibraryImport source-generated P/Invokes.
-
         [LibraryImport("libcrypto.so.3")]
         private static partial nint BIO_new_mem_buf(nint buf, int len);
 
         [LibraryImport("libcrypto.so.3")]
         private static partial void BIO_free(nint bio);
 
-        // PEM_read_bio_PrivateKey_ex with propquery "provider=tpm2":
-        // Forces OpenSSL to use the tpm2 provider — same as the C client.
-        // libCtx = 0 (nint zero) uses the default OSSL_LIB_CTX.
         [LibraryImport("libcrypto.so.3", StringMarshalling = StringMarshalling.Utf8)]
         private static partial nint PEM_read_bio_PrivateKey_ex(
-            nint bio,
-            nint x,
-            nint cb,
-            nint u,
-            nint libCtx,
-            string propQuery);
+            nint bio, nint x, nint cb, nint u, nint libCtx, string propQuery);
 
         [LibraryImport("libcrypto.so.3")]
         private static partial void EVP_PKEY_free(nint pkey);
@@ -44,13 +32,6 @@ namespace System.Security.Cryptography.X509Certificates
         [LibraryImport("libcrypto.so.3")]
         private static partial nint OSSL_PROVIDER_get0_name(nint provider);
 
-        // ── Public API ────────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Scans keyPem for "TSS2 PRIVATE KEY" label.
-        /// Pure text scan — no OpenSSL call, no TPM access.
-        /// Used as early-exit gate in CreateFromPem before the OID switch.
-        /// </summary>
         internal static bool ContainsTss2Key(ReadOnlySpan<char> keyPem)
         {
             foreach ((ReadOnlySpan<char> contents, PemFields fields) in new PemEnumerator(keyPem))
@@ -62,12 +43,24 @@ namespace System.Security.Cryptography.X509Certificates
         }
 
         /// <summary>
-        /// Loads a "TSS2 PRIVATE KEY" PEM via OpenSSL PEM_read_bio_PrivateKey_ex
-        /// with propquery "provider=tpm2". Dispatches to tpm2-openssl provider.
-        /// Returns RSAOpenSsl(SafeEvpPKeyHandle) — all crypto ops run in TPM.
-        /// Private key bytes NEVER enter process memory.
+        /// Loads TSS2 PRIVATE KEY PEM via OpenSSL tpm2 provider and binds it
+        /// to the certificate using DuplicateHandles() + SetPrivateKey().
+        ///
+        /// Why NOT CopyWithPrivateKey(SafeEvpPKeyHandle):
+        ///   That overload is PRIVATE on OpenSslX509CertificateReader — inaccessible.
+        ///
+        /// Why NOT CopyWithPrivateKey(RSA):
+        ///   Calls RSAOpenSsl(SafeEvpPKeyHandle) which calls EvpPKeyDuplicate
+        ///   -> EVP_PKEY_dup -> tpm2 provider refuses (keymgmt export failure).
+        ///
+        /// Correct path — both methods are INTERNAL, accessible from same assembly:
+        ///   DuplicateHandles(): X509UpRef(_cert) only, no private key dup
+        ///                       (cert has no key yet so key branch is skipped)
+        ///   SetPrivateKey():    _privateKey = keyHandle  (stores handle, no dup)
         /// </summary>
-        internal static RSA LoadFromPem(ReadOnlySpan<char> keyPem)
+        internal static X509Certificate2 LoadAndBind(
+            X509Certificate2 certificate,
+            ReadOnlySpan<char> keyPem)
         {
             int maxBytes = Encoding.UTF8.GetMaxByteCount(keyPem.Length);
             byte[] pemBytes = new byte[maxBytes];
@@ -84,29 +77,49 @@ namespace System.Security.Cryptography.X509Certificates
                 bio = BIO_new_mem_buf(pin.AddrOfPinnedObject(), actualBytes);
                 if (bio == 0)
                     throw new CryptographicException(
-                        "TPM2: BIO_new_mem_buf failed. " +
-                        "Verify libcrypto.so.3 is accessible via LD_LIBRARY_PATH.");
+                        "TPM2: BIO_new_mem_buf failed. Check LD_LIBRARY_PATH.");
 
-                // propquery "provider=tpm2" — explicit provider routing.
+                // propquery "provider=tpm2" forces OpenSSL to use tpm2 provider.
                 // Matches C client: PEM_read_bio_PrivateKey_ex(..., "tpm2")
+                // tpm2 provider: Esys_Load -> EVP_PKEY* backed by TPM handle.
+                // Private key bytes NEVER enter process memory.
                 evpKey = PEM_read_bio_PrivateKey_ex(bio, 0, 0, 0, 0, "provider=tpm2");
 
                 if (evpKey == 0)
                     throw new CryptographicException(
                         "TPM2: PEM_read_bio_PrivateKey_ex returned null.\n" +
-                        "Checklist:\n" +
-                        "  1. OPENSSL_CONF set to config with [tpm2_provider] activate=1 ?\n" +
-                        "  2. tpm2.so module path correct in config ?\n" +
+                        "  1. OPENSSL_CONF set with [tpm2_provider] activate=1 ?\n" +
+                        "  2. tpm2.so module path correct ?\n" +
                         "  3. LD_LIBRARY_PATH includes tpm2-tss .libs ?\n" +
-                        "  4. /dev/tpm0 or /dev/tpmrm0 accessible ?\n" +
-                        "  5. testkey.priv is a valid TSS2 PRIVATE KEY blob ?");
+                        "  4. /dev/tpm0 or /dev/tpmrm0 accessible ?");
 
                 VerifyTpm2Provider(evpKey);
 
-                var handle = new SafeEvpPKeyHandle(evpKey, ownsHandle: true);
-                evpKey = 0; // handle owns it now
+                // SafeEvpPKeyHandle stores the EVP_PKEY* pointer.
+                // ReleaseHandle calls EVP_PKEY_free — supported by tpm2 provider.
+                // Does NOT call EVP_PKEY_dup — NOT supported (non-exportable key).
+                var keyHandle = new SafeEvpPKeyHandle(evpKey, ownsHandle: true);
+                evpKey = 0; // keyHandle owns it now
 
-                return new RSAOpenSsl(handle);
+                // Cast Pal to concrete Linux implementation — same assembly.
+                OpenSslX509CertificateReader palReader =
+                    (OpenSslX509CertificateReader)certificate.Pal;
+
+                // DuplicateHandles() — internal method on OpenSslX509CertificateReader:
+                //   SafeX509Handle certHandle = Interop.Crypto.X509UpRef(_cert);
+                //   OpenSslX509CertificateReader dup = new(certHandle);
+                //   if (_privateKey != null) { ... }  <- skipped, cert has no key yet
+                //   return dup;
+                // Result: new reader with same X509* cert, _privateKey is null.
+                OpenSslX509CertificateReader duplicate = palReader.DuplicateHandles();
+
+                // SetPrivateKey() — internal method on OpenSslX509CertificateReader:
+                //   _privateKey = privateKey;   <- one line, stores handle directly
+                // No EVP_PKEY_dup, no export, no validation. Fully TPM-safe.
+                duplicate.SetPrivateKey(keyHandle);
+
+                // Internal X509Certificate2 constructor accepts ICertificatePal.
+                return new X509Certificate2(duplicate);
             }
             finally
             {
@@ -122,8 +135,7 @@ namespace System.Security.Cryptography.X509Certificates
             nint provider = EVP_PKEY_get0_provider(evpKey);
             if (provider == 0)
                 throw new CryptographicException(
-                    "TPM2: EVP_PKEY has no OSSL_PROVIDER. " +
-                    "Ensure OpenSSL 3.x (not 1.x) is in use.");
+                    "TPM2: EVP_PKEY has no OSSL_PROVIDER. Ensure OpenSSL 3.x.");
 
             nint namePtr = OSSL_PROVIDER_get0_name(provider);
             string name = namePtr != 0
@@ -132,8 +144,7 @@ namespace System.Security.Cryptography.X509Certificates
 
             if (!string.Equals(name, "tpm2", StringComparison.Ordinal))
                 throw new CryptographicException(
-                    $"TPM2: Key loaded by provider '{name}' not 'tpm2'. " +
-                    $"Check OPENSSL_CONF tpm2 provider config.");
+                    $"TPM2: Key loaded by provider '{name}' not 'tpm2'.");
         }
     }
 }

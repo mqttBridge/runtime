@@ -882,6 +882,8 @@
     <Compile Include="System\Security\Cryptography\X509Certificates\OpenSslSingleCertLoader.cs" />
     <Compile Include="System\Security\Cryptography\X509Certificates\OpenSslX509CertificateReader.cs" />
     <Compile Include="System\Security\Cryptography\X509Certificates\Tpm2KeyLoader.Unix.cs" />
+    <Compile Include="System\Security\Cryptography\X509Certificates\X509Certificate2.Tpm2.Unix.cs" />
+    <Compile Include="System\Security\Cryptography\Tpm2SafeRSAWrapper.Unix.cs" />
     <Compile Include="System\Security\Cryptography\X509Certificates\OpenSslX509ChainEventSource.cs" />
     <Compile Include="System\Security\Cryptography\X509Certificates\OpenSslX509ChainProcessor.cs" />
     <Compile Include="System\Security\Cryptography\X509Certificates\OpenSslX509Encoder.cs" />

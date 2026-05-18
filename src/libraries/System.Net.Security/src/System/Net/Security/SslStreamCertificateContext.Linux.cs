@@ -55,12 +55,23 @@ namespace System.Net.Security
             Trust = trust;
             SslContexts = new ConcurrentDictionary<SslProtocols, SafeSslContextHandle>();
 
-            using (RSAOpenSsl? rsa = (RSAOpenSsl?)target.GetRSAPrivateKey())
+            // ── TPM2-safe KeyHandle extraction ────────────────────────────────────────────
+            // Original code: (RSAOpenSsl?)target.GetRSAPrivateKey()
+            //   casts result to RSAOpenSsl, then calls rsa.DuplicateKeyHandle().
+            //   RSAOpenSsl constructor calls EvpPKeyDuplicate -> EVP_PKEY_dup.
+            //   tpm2 provider refuses EVP_PKEY_dup: "keymgmt export failure".
+            //
+            // Fix: cast to RSA (not RSAOpenSsl). OpenSslX509CertificateReader.GetRSAPrivateKey()
+            // now detects TPM keys and returns Tpm2SafeRSAWrapper instead of RSAOpenSsl.
+            // Tpm2SafeRSAWrapper.DuplicateKeyHandle() calls EVP_PKEY_up_ref — TPM-safe.
+            // For software keys RSAOpenSsl is returned as before — unchanged behaviour.
+            // ─────────────────────────────────────────────────────────────────────────────
+            // TPM2-safe: get raw EVP_PKEY* pointer (already up_ref'd) via public API.
+            // Avoids RSAOpenSsl(SafeEvpPKeyHandle) which calls EVP_PKEY_dup — tpm2 refuses.
+            IntPtr tpmKeyPtr = X509Certificate2.GetPrivateKeyHandlePtr(target);
+            if (tpmKeyPtr != IntPtr.Zero)
             {
-                if (rsa != null)
-                {
-                    KeyHandle = rsa.DuplicateKeyHandle();
-                }
+                KeyHandle = new SafeEvpPKeyHandle(tpmKeyPtr, ownsHandle: true);
             }
 
             if (KeyHandle == null)
