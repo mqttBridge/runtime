@@ -61,6 +61,14 @@ namespace System.Net.Security
             TargetCertificate = target;
             Trust = trust;
 
+            // TPM2-safe: GetPrivateKeyHandlePtr returns EVP_PKEY* via up_ref only.
+            // RSAOpenSsl(SafeEvpPKeyHandle) calls EVP_PKEY_dup which tpm2 refuses.
+            IntPtr tpmKeyPtr = X509Certificate2.GetPrivateKeyHandlePtr(target);
+            if (tpmKeyPtr != IntPtr.Zero)
+            {
+                KeyHandle = new SafeEvpPKeyHandle(tpmKeyPtr, ownsHandle: true);
+            }
+            else
             using (RSAOpenSsl? rsa = (RSAOpenSsl?)target.GetRSAPrivateKey())
             {
                 if (rsa != null)

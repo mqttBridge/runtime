@@ -11,7 +11,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace System.Security.Cryptography.X509Certificates
 {
-    internal sealed class OpenSslX509CertificateReader : ICertificatePal
+    internal sealed partial class OpenSslX509CertificateReader : ICertificatePal
     {
         private static DateTimeFormatInfo? s_validityDateTimeFormatInfo;
 
@@ -543,7 +543,36 @@ namespace System.Security.Cryptography.X509Certificates
             _privateKey = privateKey;
         }
 
-        internal SafeEvpPKeyHandle? PrivateKeyHandle
+#if !TARGET_WINDOWS
+        [System.Runtime.InteropServices.LibraryImport("libcrypto.so.3")]
+        private static partial nint EvpPkeyGetProvider(nint pkey);
+
+        [System.Runtime.InteropServices.LibraryImport("libcrypto.so.3")]
+        private static partial nint OsslProviderGetName(nint provider);
+
+        private static bool IsTpm2PrivateKey(SafeEvpPKeyHandle keyHandle)
+        {
+            if (keyHandle == null || keyHandle.IsInvalid)
+                return false;
+            bool addedRef = false;
+            try
+            {
+                keyHandle.DangerousAddRef(ref addedRef);
+                nint provider = EvpPkeyGetProvider(keyHandle.DangerousGetHandle());
+                if (provider == 0) return false;
+                nint namePtr = OsslProviderGetName(provider);
+                if (namePtr == 0) return false;
+                string name = System.Runtime.InteropServices.Marshal.PtrToStringAnsi(namePtr) ?? string.Empty;
+                return string.Equals(name, "tpm2", StringComparison.Ordinal);
+            }
+            finally
+            {
+                if (addedRef) keyHandle.DangerousRelease();
+            }
+        }
+#endif
+
+        public SafeEvpPKeyHandle? PrivateKeyHandle
         {
             get { return _privateKey; }
         }
@@ -554,6 +583,16 @@ namespace System.Security.Cryptography.X509Certificates
             {
                 return null;
             }
+
+#if !TARGET_WINDOWS
+            // TPM2-safe: RSAOpenSsl(SafeEvpPKeyHandle) calls EvpPKeyDuplicate
+            // -> EVP_PKEY_dup -> tpm2 provider refuses (non-exportable key).
+            // Return Tpm2SafeRSAWrapper which uses DuplicateHandle = up_ref only.
+            if (IsTpm2PrivateKey(_privateKey))
+            {
+                return new Tpm2SafeRSAWrapper(_privateKey);
+            }
+#endif
 
             return new RSAOpenSsl(_privateKey);
         }
