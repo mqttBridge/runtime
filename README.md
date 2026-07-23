@@ -1,3 +1,8 @@
+Port of release/8.0 TPM2 patch to v10.0.8.
+Fixes: PemEnumerator.Utf16, SslException->CryptographicException,
+csproj unix ItemGroup placement,  prefix.
+Zero C# application code changes required.
+
 # .NET Runtime
 
 [![Build Status](https://dev.azure.com/dnceng-public/public/_apis/build/status/dotnet/runtime/runtime?branchName=main)](https://dev.azure.com/dnceng-public/public/_build/latest?definitionId=129&branchName=main)
